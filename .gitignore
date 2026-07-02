@@ -1,2 +1,6 @@
 .venv/*
 .env
+__pycache__/*
+indexer/__pycache__/*
+retriever/__pycache__/*
+monitoring/__pycache__/*

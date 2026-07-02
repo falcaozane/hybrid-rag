@@ -29,7 +29,7 @@ st.set_page_config(
 _DEFAULTS: dict = {
     "chunks": [],
     "chunk_pages": [],
-    "faiss_index": None,
+    "chroma_collection": None,
     "bm25_index": None,
     "file_metadata": [],
     "indexed": False,
@@ -163,11 +163,17 @@ with st.sidebar:
         options=["Both", "Vector", "BM25"],
         index=0,
         help=(
-            "**Both** — FAISS vector search + BM25 keyword search, "
+            "**Both** — ChromaDB vector search + BM25 keyword search, "
             "merged with Reciprocal Rank Fusion.\n\n"
-            "**Vector** — dense semantic search only (FAISS).\n\n"
+            "**Vector** — dense semantic search only (ChromaDB).\n\n"
             "**BM25** — sparse keyword search only."
         ),
+    )
+
+    llm_provider = st.selectbox(
+        "LLM Provider",
+        options=["NVIDIA", "Cerebras", "Groq"],
+        index=0,
     )
 
     # Top-K slider
@@ -227,13 +233,15 @@ with btn_col:
 if send_clicked and user_input.strip():
     if not st.session_state.indexed:
         st.warning("⚠️ Please upload and index at least one PDF first.")
-    elif not os.environ.get("ANTHROPIC_API_KEY"):
-        st.error("❌ ANTHROPIC_API_KEY environment variable is not set.")
     else:
-        with st.spinner("Thinking…"):
-            compiled_graph = build_graph(
-                st.session_state, top_k=top_k, retrieval_mode=retrieval_mode
-            )
+        api_key_env = f"{llm_provider.upper()}_API_KEY"
+        if not os.environ.get(api_key_env):
+            st.error(f"❌ {api_key_env} environment variable is not set.")
+        else:
+            with st.spinner("Thinking…"):
+                compiled_graph = build_graph(
+                    st.session_state, top_k=top_k, retrieval_mode=retrieval_mode, llm_provider=llm_provider
+                )
 
             initial_state: dict = {
                 "pdf_text":          [],

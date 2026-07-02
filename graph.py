@@ -28,7 +28,6 @@ from dotenv import load_dotenv
 # override=False so a real env var already set in the shell takes precedence.
 load_dotenv(dotenv_path=Path(__file__).parent / ".env", override=False)
 
-import anthropic
 from langgraph.graph import END, START, StateGraph
 
 
@@ -64,7 +63,7 @@ def parse_and_index(pdf_files: list, session_state: dict) -> None:
     """
     from indexer.pdf_indexer import (
         build_bm25_index,
-        build_faiss_index,
+        build_chroma_index,
         chunk_text,
         extract_pdf,
     )
@@ -103,13 +102,13 @@ def parse_and_index(pdf_files: list, session_state: dict) -> None:
         # All PDFs were image-only — nothing to index
         session_state["chunks"] = []
         session_state["chunk_pages"] = []
-        session_state["faiss_index"] = None
+        session_state["chroma_collection"] = None
         session_state["bm25_index"] = None
         session_state["file_metadata"] = file_metadata
         session_state["indexed"] = False
         return
 
-    session_state["faiss_index"] = build_faiss_index(all_chunks)
+    session_state["chroma_collection"] = build_chroma_index(all_chunks, all_chunk_pages)
     session_state["bm25_index"] = build_bm25_index(all_chunks)
     session_state["chunks"] = all_chunks
     session_state["chunk_pages"] = all_chunk_pages
@@ -121,7 +120,7 @@ def parse_and_index(pdf_files: list, session_state: dict) -> None:
 # Graph factory
 # ---------------------------------------------------------------------------
 
-def build_graph(session_state: dict, top_k: int = 5, retrieval_mode: str = "Both"):
+def build_graph(session_state: dict, top_k: int = 5, retrieval_mode: str = "Both", llm_provider: str = "Groq"):
     """
     Build and compile a LangGraph StateGraph for one query invocation.
 
@@ -146,9 +145,7 @@ def build_graph(session_state: dict, top_k: int = 5, retrieval_mode: str = "Both
 
         results = retrieve(
             query=state["query"],
-            faiss_index=session_state["faiss_index"],
-            chunks=session_state["chunks"],
-            chunk_pages=session_state["chunk_pages"],
+            chroma_collection=session_state["chroma_collection"],
             k=top_k,
         )
         return {"vector_results": results}
@@ -226,27 +223,44 @@ def build_graph(session_state: dict, top_k: int = 5, retrieval_mode: str = "Both
 
         prompt = f"{system_prompt}\n\n{user_message}"  # kept for prompt_sent logging
 
-        api_key = os.environ.get("ANTHROPIC_API_KEY", "")
-        client = anthropic.Anthropic(api_key=api_key)
-
         t0 = time.time()
-        response = client.messages.create(
-            model="claude-sonnet-4-6",
-            max_tokens=1024,
-            system=system_prompt,
-            messages=[{"role": "user", "content": user_message}],
-        )
+        
+        if llm_provider == "NVIDIA":
+            from langchain_nvidia_ai_endpoints import ChatNVIDIA
+            llm = ChatNVIDIA(model="mistralai/mistral-medium-3.5-128b", max_tokens=1024)
+        elif llm_provider == "Cerebras":
+            from langchain_cerebras import ChatCerebras
+            llm = ChatCerebras(model="zai-glm-4.7", max_tokens=1024)
+        elif llm_provider == "Groq":
+            from langchain_groq import ChatGroq
+            llm = ChatGroq(model="llama-3.3-70b-versatile", max_tokens=1024)
+        else:
+            raise ValueError(f"Unknown provider: {llm_provider}")
+            
+        from langchain_core.messages import SystemMessage, HumanMessage
+        messages = [
+            SystemMessage(content=system_prompt),
+            HumanMessage(content=user_message)
+        ]
+        
+        response = llm.invoke(messages)
         latency_ms = round((time.time() - t0) * 1000, 1)
 
-        answer = response.content[0].text
-        usage = response.usage
+        answer = response.content
+        usage = response.usage_metadata
+        if usage:
+            input_tokens = usage.get("input_tokens", 0)
+            output_tokens = usage.get("output_tokens", 0)
+        else:
+            input_tokens = 0
+            output_tokens = 0
 
         return {
             "answer": answer,
             "prompt_sent": prompt,
-            "prompt_tokens": usage.input_tokens,
-            "completion_tokens": usage.output_tokens,
-            "total_tokens": usage.input_tokens + usage.output_tokens,
+            "prompt_tokens": input_tokens,
+            "completion_tokens": output_tokens,
+            "total_tokens": input_tokens + output_tokens,
             "latency_ms": latency_ms,
         }
 
@@ -296,7 +310,7 @@ def save_graph_image(output_path: str | Path = "graph.png") -> Path:
 
     # Build a minimal graph with placeholder session_state — we only need the
     # topology, so no real FAISS / BM25 indexes are required.
-    compiled = build_graph(session_state={}, top_k=5, retrieval_mode="Both")
+    compiled = build_graph(session_state={}, top_k=5, retrieval_mode="Both", llm_provider="Groq")
 
     # draw_mermaid_png() returns raw PNG bytes; write them to disk.
     png_bytes: bytes = compiled.get_graph().draw_mermaid_png()

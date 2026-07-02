@@ -1,43 +1,34 @@
 """
-Dense (FAISS) retriever using the shared all-MiniLM-L6-v2 singleton.
+Dense (ChromaDB) retriever.
 """
 
 from __future__ import annotations
 
-import numpy as np
-import faiss
-
-# Reuse the singleton loaded by the indexer — avoids a second 90 MB load.
-from indexer.pdf_indexer import _get_model
-
-
 def retrieve(
     query: str,
-    faiss_index: faiss.IndexFlatIP,
-    chunks: list[str],
-    chunk_pages: list[int],
+    chroma_collection,
     k: int = 5,
 ) -> list[tuple[str, float, int]]:
     """
-    Encode *query*, search the FAISS index, return top-k results.
+    Search the ChromaDB collection, return top-k results.
 
-    Returns list of (chunk_text, cosine_score, page_num), sorted by score desc.
+    Returns list of (chunk_text, distance_score, page_num), sorted by score.
     """
-    model = _get_model()
-    query_embedding = model.encode(
-        [query],
-        normalize_embeddings=True,
-        show_progress_bar=False,
+    results = chroma_collection.query(
+        query_texts=[query],
+        n_results=k
     )
-    query_embedding = np.array(query_embedding, dtype="float32")
 
-    actual_k = min(k, len(chunks))
-    scores, indices = faiss_index.search(query_embedding, actual_k)
+    formatted_results: list[tuple[str, float, int]] = []
+    
+    # Chroma returns lists of lists for queries
+    if not results["documents"] or not results["documents"][0]:
+        return formatted_results
+        
+    for i in range(len(results["documents"][0])):
+        doc = results["documents"][0][i]
+        dist = results["distances"][0][i] if results["distances"] else 0.0
+        page = results["metadatas"][0][i]["page"] if results["metadatas"] else 0
+        formatted_results.append((doc, float(dist), int(page)))
 
-    results: list[tuple[str, float, int]] = []
-    for score, idx in zip(scores[0], indices[0]):
-        if idx == -1:  # FAISS padding sentinel — fewer results than k
-            continue
-        results.append((chunks[idx], float(score), chunk_pages[idx]))
-
-    return results
+    return formatted_results

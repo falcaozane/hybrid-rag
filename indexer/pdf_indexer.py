@@ -6,7 +6,8 @@ FAISS (cosine via IndexFlatIP) and BM25 index builders.
 from __future__ import annotations
 
 import numpy as np
-import faiss
+import chromadb
+from chromadb.utils import embedding_functions
 import fitz  # PyMuPDF
 from sentence_transformers import SentenceTransformer
 from rank_bm25 import BM25Okapi
@@ -100,26 +101,33 @@ def chunk_text(
 
 
 # ---------------------------------------------------------------------------
-# FAISS index
+# ChromaDB index
 # ---------------------------------------------------------------------------
 
-def build_faiss_index(chunks: list[str]) -> faiss.IndexFlatIP:
+def build_chroma_index(chunks: list[str], chunk_pages: list[int]):
     """
-    Encode chunks with all-MiniLM-L6-v2 (L2-normalised) and build an
-    IndexFlatIP.  Inner product on unit vectors == cosine similarity.
+    Build an in-memory ChromaDB collection with the chunks and their pages.
     """
-    model = _get_model()
-    embeddings = model.encode(
-        chunks,
-        normalize_embeddings=True,
-        show_progress_bar=False,
-        batch_size=64,
+    client = chromadb.EphemeralClient()
+    
+    # We use the same model "all-MiniLM-L6-v2" as the embedding function
+    sentence_transformer_ef = embedding_functions.SentenceTransformerEmbeddingFunction(
+        model_name="all-MiniLM-L6-v2"
     )
-    embeddings = np.array(embeddings, dtype="float32")
-    dim = embeddings.shape[1]  # 384 for all-MiniLM-L6-v2
-    index = faiss.IndexFlatIP(dim)
-    index.add(embeddings)
-    return index
+    
+    collection = client.create_collection(
+        name="rag_docs",
+        embedding_function=sentence_transformer_ef,
+        metadata={"hnsw:space": "cosine"}
+    )
+    
+    collection.add(
+        documents=chunks,
+        metadatas=[{"page": p} for p in chunk_pages],
+        ids=[f"id_{i}" for i in range(len(chunks))]
+    )
+    
+    return collection
 
 
 # ---------------------------------------------------------------------------
